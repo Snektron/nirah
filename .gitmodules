@@ -1,0 +1,9 @@
+[submodule "subprojects/pal"]
+	path = subprojects/pal
+	url = ssh://git@github.com/GPUOpen-Drivers/pal.git
+[submodule "subprojects/MetroHash"]
+	path = subprojects/MetroHash
+	url = ssh://git@github.com/GPUOpen-Drivers/MetroHash.git
+[submodule "subprojects/CWPack"]
+	path = subprojects/CWPack
+	url = ssh://git@github.com/GPUOpen-Drivers/CWPack.git
