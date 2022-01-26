@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.21)
 
 project(nirah LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+find_package(fmt)
 
 # From https://github.com/GPUOpen-Drivers/xgl/blob/dev/icd/make/importdefs
 set(PAL_CLIENT_INTERFACE_MAJOR_VERSION 697 CACHE PATH "${PROJECT_NAME} override" FORCE)
@@ -15,3 +18,4 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/subprojects/pal")
 set(NIRAH_SOURCES "${CMAKE_SOURCE_DIR}/src/main.cpp")
 add_executable(nirah ${NIRAH_SOURCES})
 target_link_libraries(nirah pal)
+target_link_libraries(nirah fmt::fmt)
