@@ -7,6 +7,7 @@
 
 #include <fmt/format.h>
 
+#include <stdexcept>
 #include <utility>
 #include <cstdlib>
 #include <cstdint>
@@ -71,25 +72,24 @@ struct Unique {
     }
 };
 
-int main() {
+Unique<Pal::IPlatform> create_platform() {
     auto platform_info = Pal::PlatformCreateInfo{
         .pSettingsPath = "/etc/amd"
     };
 
-    auto platform = Unique<Pal::IPlatform>(
+    return Unique<Pal::IPlatform>(
         [](Util::Result* result) { return Pal::GetPlatformSize(); },
         [&](void* mem, Pal::IPlatform** platform) { return Pal::CreatePlatform(platform_info, mem, platform); }
     );
+}
 
-    fmt::print("Platform initialized\n");
-
+Pal::IDevice* select_device(Pal::IPlatform* platform) {
     Pal::IDevice* devices[Pal::MaxDevices];
     uint32_t device_count = 0;
     checkResult(platform->EnumerateDevices(&device_count, devices));
 
     if (device_count == 0) {
-        fmt::print("Platform has no devices :(\n");
-        return EXIT_FAILURE;
+        throw std::runtime_error("Platform has no devices");
     }
 
     fmt::print("Platform has {} device(s):\n", device_count);
@@ -101,29 +101,20 @@ int main() {
         fmt::print("  graphics engines: {}\n", props.engineProperties[Pal::EngineTypeUniversal].engineCount);
         fmt::print("  compute engines: {}\n", props.engineProperties[Pal::EngineTypeCompute].engineCount);
         fmt::print("  dma engines: {}\n", props.engineProperties[Pal::EngineTypeDma].engineCount);
-        fmt::print("  timer engines: {}\n", props.engineProperties[Pal::EngineTypeTimer].engineCount);
+        fmt::print("  max user data entries: {}\n", props.gfxipProperties.maxUserDataEntries);
+        fmt::print("  supports HSA abi: {}\n", props.gfxipProperties.flags.supportHsaAbi ? "true" : "false");
+        fmt::print("  buffer view descriptor size: {}\n", props.gfxipProperties.srdSizes.bufferView);
     }
 
-    auto* device = devices[0];
-    Pal::DeviceProperties props;
-    checkResult(device->GetProperties(&props));
+    return devices[0];
+}
 
-    fmt::print("Selected device '{}'\n", props.gpuName);
-
-    auto finalize_info = Pal::DeviceFinalizeInfo{};
-    finalize_info.requestedEngineCounts[Pal::EngineTypeCompute].engines = 1;
-    checkResult(device->CommitSettingsAndInit());
-    checkResult(device->Finalize(finalize_info));
-
-    fmt::print("Device initialized\n");
-
+Unique<Pal::IQueue> create_queue(Pal::IDevice* device, const Pal::DeviceProperties& props) {
     if (props.engineProperties[Pal::EngineTypeCompute].engineCount == 0) {
-        fmt::print("No compute engines :(\n");
-        return EXIT_FAILURE;
+        throw std::runtime_error("Device has no compute engines");
     }
     if ((props.engineProperties[Pal::EngineTypeCompute].queueSupport & Pal::SupportQueueTypeCompute) == 0) {
-        fmt::print("Compute engine does not support compute queue :(\n");
-        return EXIT_FAILURE;
+        throw std::runtime_error("Compute engine does not support compute queue ???");
     }
 
     auto queue_create_info = Pal::QueueCreateInfo{
@@ -131,13 +122,13 @@ int main() {
         .engineType = Pal::EngineTypeCompute,
         .engineIndex = 0
     };
-    auto queue = Unique<Pal::IQueue>(
+    return Unique<Pal::IQueue>(
         [&](Util::Result* result) { return device->GetQueueSize(queue_create_info, result); },
         [&](void* mem, Pal::IQueue** queue) { return device->CreateQueue(queue_create_info, mem, queue); }
     );
+}
 
-    fmt::print("Compute queue initialized\n");
-
+Unique<Pal::ICmdAllocator> create_cmd_allocator(Pal::IDevice* device) {
     auto cmda_create_info = Pal::CmdAllocatorCreateInfo{};
     // Values taken from xgl/icd/settings/settings_xgl.json
     cmda_create_info.allocInfo[Pal::CommandDataAlloc] = {
@@ -155,34 +146,62 @@ int main() {
         .allocSize = 131072,
         .suballocSize = 16384,
     };
-    auto cmda = Unique<Pal::ICmdAllocator>(
+
+    return Unique<Pal::ICmdAllocator>(
         [&](Util::Result* result) { return device->GetCmdAllocatorSize(cmda_create_info, result); },
         [&](void* mem, Pal::ICmdAllocator** cmda) { return device->CreateCmdAllocator(cmda_create_info, mem, cmda); }
     );
+}
 
-    fmt::print("Command allocator initialized\n");
-
+Unique<Pal::ICmdBuffer> create_cmd_buffer(Pal::IDevice* device, Pal::ICmdAllocator* cmda) {
     auto cmdbuf_create_info = Pal::CmdBufferCreateInfo{
-        .pCmdAllocator = cmda.ptr,
+        .pCmdAllocator = cmda,
         .queueType = Pal::QueueTypeCompute,
         .engineType = Pal::EngineTypeCompute
     };
-    auto cmdbuf = Unique<Pal::ICmdBuffer>(
+    return Unique<Pal::ICmdBuffer>(
         [&](Util::Result* result) { return device->GetCmdBufferSize(cmdbuf_create_info, result); },
         [&](void* mem, Pal::ICmdBuffer** cmdbuf) { return device->CreateCmdBuffer(cmdbuf_create_info, mem, cmdbuf); }
     );
+}
 
-    fmt::print("Command buffer initialized\n");
+Unique<Pal::IPipeline> create_pipeline(Pal::IDevice* device) {
     auto pipeline_create_info = Pal::ComputePipelineCreateInfo{
         .pPipelineBinary = test_elf_start,
         .pipelineBinarySize = static_cast<size_t>(test_elf_end - test_elf_start)
     };
 
-    auto pipeline = Unique<Pal::IPipeline>(
+    return Unique<Pal::IPipeline>(
         [&](Util::Result* result) { return device->GetComputePipelineSize(pipeline_create_info, result); },
         [&](void* mem, Pal::IPipeline** pipeline) { return device->CreateComputePipeline(pipeline_create_info, mem, pipeline); }
     );
+}
 
+int main() {
+    auto platform = create_platform();
+    fmt::print("Platform initialized\n");
+
+    auto* device = select_device(platform.ptr);
+    Pal::DeviceProperties props;
+    checkResult(device->GetProperties(&props));
+    fmt::print("Selected device '{}'\n", props.gpuName);
+
+    auto finalize_info = Pal::DeviceFinalizeInfo{};
+    finalize_info.requestedEngineCounts[Pal::EngineTypeCompute].engines = 1;
+    checkResult(device->CommitSettingsAndInit());
+    checkResult(device->Finalize(finalize_info));
+    fmt::print("Device initialized\n");
+
+    auto queue = create_queue(device, props);
+    fmt::print("Compute queue initialized\n");
+
+    auto cmda = create_cmd_allocator(device);
+    fmt::print("Command allocator initialized\n");
+
+    auto cmd_buf = create_cmd_buffer(device, cmda.ptr);
+    fmt::print("Command buffer initialized\n");
+
+    auto pipeline = create_pipeline(device);
     fmt::print("Pipeline initialized\n");
 
     return EXIT_SUCCESS;
