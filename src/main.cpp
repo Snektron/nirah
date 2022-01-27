@@ -11,6 +11,9 @@
 #include <cstdlib>
 #include <cstdint>
 
+extern const char test_elf_start[] asm("_binary_test_elf_start");
+extern const char test_elf_end[] asm("_binary_test_elf_end");
+
 struct PalError {
     Util::Result result;
 };
@@ -109,6 +112,7 @@ int main() {
 
     auto finalize_info = Pal::DeviceFinalizeInfo{};
     finalize_info.requestedEngineCounts[Pal::EngineTypeCompute].engines = 1;
+    checkResult(device->CommitSettingsAndInit());
     checkResult(device->Finalize(finalize_info));
 
     fmt::print("Device initialized\n");
@@ -169,6 +173,17 @@ int main() {
     );
 
     fmt::print("Command buffer initialized\n");
+    auto pipeline_create_info = Pal::ComputePipelineCreateInfo{
+        .pPipelineBinary = test_elf_start,
+        .pipelineBinarySize = static_cast<size_t>(test_elf_end - test_elf_start)
+    };
+
+    auto pipeline = Unique<Pal::IPipeline>(
+        [&](Util::Result* result) { return device->GetComputePipelineSize(pipeline_create_info, result); },
+        [&](void* mem, Pal::IPipeline** pipeline) { return device->CreateComputePipeline(pipeline_create_info, mem, pipeline); }
+    );
+
+    fmt::print("Pipeline initialized\n");
 
     return EXIT_SUCCESS;
 }

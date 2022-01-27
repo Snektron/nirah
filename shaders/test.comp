@@ -1,0 +1,16 @@
+#version 440
+
+layout(local_size_x=8) in;
+
+layout(binding=0) readonly buffer Input {
+    float x[];
+};
+
+layout(binding=1) buffer Output {
+    float y[];
+};
+
+void main() {
+    const uint id = gl_GlobalInvocationID.x;
+    y[id] = x[id] * 2;
+}
