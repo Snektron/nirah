@@ -4,6 +4,8 @@
 #include <palQueue.h>
 #include <palCmdAllocator.h>
 #include <palCmdBuffer.h>
+#include <palPipeline.h>
+#include <palGpuMemory.h>
 
 #include <fmt/format.h>
 
@@ -73,13 +75,13 @@ struct Unique {
 };
 
 Unique<Pal::IPlatform> create_platform() {
-    auto platform_info = Pal::PlatformCreateInfo{
+    auto create_info = Pal::PlatformCreateInfo{
         .pSettingsPath = "/etc/amd"
     };
 
     return Unique<Pal::IPlatform>(
         [](Util::Result* result) { return Pal::GetPlatformSize(); },
-        [&](void* mem, Pal::IPlatform** platform) { return Pal::CreatePlatform(platform_info, mem, platform); }
+        [&](void* mem, Pal::IPlatform** platform) { return Pal::CreatePlatform(create_info, mem, platform); }
     );
 }
 
@@ -112,68 +114,85 @@ Pal::IDevice* select_device(Pal::IPlatform* platform) {
 Unique<Pal::IQueue> create_queue(Pal::IDevice* device, const Pal::DeviceProperties& props) {
     if (props.engineProperties[Pal::EngineTypeCompute].engineCount == 0) {
         throw std::runtime_error("Device has no compute engines");
-    }
-    if ((props.engineProperties[Pal::EngineTypeCompute].queueSupport & Pal::SupportQueueTypeCompute) == 0) {
+    } else if ((props.engineProperties[Pal::EngineTypeCompute].queueSupport & Pal::SupportQueueTypeCompute) == 0) {
         throw std::runtime_error("Compute engine does not support compute queue ???");
     }
 
-    auto queue_create_info = Pal::QueueCreateInfo{
+    auto create_info = Pal::QueueCreateInfo{
         .queueType = Pal::QueueTypeCompute,
         .engineType = Pal::EngineTypeCompute,
         .engineIndex = 0
     };
+
     return Unique<Pal::IQueue>(
-        [&](Util::Result* result) { return device->GetQueueSize(queue_create_info, result); },
-        [&](void* mem, Pal::IQueue** queue) { return device->CreateQueue(queue_create_info, mem, queue); }
+        [&](Util::Result* result) { return device->GetQueueSize(create_info, result); },
+        [&](void* mem, Pal::IQueue** queue) { return device->CreateQueue(create_info, mem, queue); }
     );
 }
 
 Unique<Pal::ICmdAllocator> create_cmd_allocator(Pal::IDevice* device) {
-    auto cmda_create_info = Pal::CmdAllocatorCreateInfo{};
+    auto create_info = Pal::CmdAllocatorCreateInfo{};
     // Values taken from xgl/icd/settings/settings_xgl.json
-    cmda_create_info.allocInfo[Pal::CommandDataAlloc] = {
+    create_info.allocInfo[Pal::CommandDataAlloc] = {
         .allocHeap = Pal::GpuHeapGartUswc,
         .allocSize = 2097152,
         .suballocSize = 65536,
     };
-    cmda_create_info.allocInfo[Pal::EmbeddedDataAlloc] = {
+    create_info.allocInfo[Pal::EmbeddedDataAlloc] = {
         .allocHeap = Pal::GpuHeapGartUswc,
         .allocSize = 131072,
         .suballocSize = 16384,
     };
-    cmda_create_info.allocInfo[Pal::GpuScratchMemAlloc] = {
+    create_info.allocInfo[Pal::GpuScratchMemAlloc] = {
         .allocHeap = Pal::GpuHeapInvisible,
         .allocSize = 131072,
         .suballocSize = 16384,
     };
 
     return Unique<Pal::ICmdAllocator>(
-        [&](Util::Result* result) { return device->GetCmdAllocatorSize(cmda_create_info, result); },
-        [&](void* mem, Pal::ICmdAllocator** cmda) { return device->CreateCmdAllocator(cmda_create_info, mem, cmda); }
+        [&](Util::Result* result) { return device->GetCmdAllocatorSize(create_info, result); },
+        [&](void* mem, Pal::ICmdAllocator** cmda) { return device->CreateCmdAllocator(create_info, mem, cmda); }
     );
 }
 
 Unique<Pal::ICmdBuffer> create_cmd_buffer(Pal::IDevice* device, Pal::ICmdAllocator* cmda) {
-    auto cmdbuf_create_info = Pal::CmdBufferCreateInfo{
+    auto create_info = Pal::CmdBufferCreateInfo{
         .pCmdAllocator = cmda,
         .queueType = Pal::QueueTypeCompute,
         .engineType = Pal::EngineTypeCompute
     };
+
     return Unique<Pal::ICmdBuffer>(
-        [&](Util::Result* result) { return device->GetCmdBufferSize(cmdbuf_create_info, result); },
-        [&](void* mem, Pal::ICmdBuffer** cmdbuf) { return device->CreateCmdBuffer(cmdbuf_create_info, mem, cmdbuf); }
+        [&](Util::Result* result) { return device->GetCmdBufferSize(create_info, result); },
+        [&](void* mem, Pal::ICmdBuffer** cmdbuf) { return device->CreateCmdBuffer(create_info, mem, cmdbuf); }
     );
 }
 
 Unique<Pal::IPipeline> create_pipeline(Pal::IDevice* device) {
-    auto pipeline_create_info = Pal::ComputePipelineCreateInfo{
+    auto create_info = Pal::ComputePipelineCreateInfo{
         .pPipelineBinary = test_elf_start,
         .pipelineBinarySize = static_cast<size_t>(test_elf_end - test_elf_start)
     };
 
     return Unique<Pal::IPipeline>(
-        [&](Util::Result* result) { return device->GetComputePipelineSize(pipeline_create_info, result); },
-        [&](void* mem, Pal::IPipeline** pipeline) { return device->CreateComputePipeline(pipeline_create_info, mem, pipeline); }
+        [&](Util::Result* result) { return device->GetComputePipelineSize(create_info, result); },
+        [&](void* mem, Pal::IPipeline** pipeline) { return device->CreateComputePipeline(create_info, mem, pipeline); }
+    );
+}
+
+Unique<Pal::IGpuMemory> create_buffer(Pal::IDevice* device, Pal::gpusize size) {
+    auto create_info = Pal::GpuMemoryCreateInfo{
+        .size = size,
+        .alignment = 0, // TODO: better alignment? 0 = allocation granularity
+        .priority = Pal::GpuMemPriority::Normal,
+        .heapAccess = Pal::GpuHeapAccessExplicit, // Taken from glx, Memory::Create
+        .heapCount = 1,
+        .heaps = {Pal::GpuHeapLocal},
+    };
+
+    return Unique<Pal::IGpuMemory>(
+        [&](Util::Result* result) { return device->GetGpuMemorySize(create_info, result); },
+        [&](void* mem, Pal::IGpuMemory** buffer) { return device->CreateGpuMemory(create_info, mem, buffer); }
     );
 }
 
@@ -203,6 +222,9 @@ int main() {
 
     auto pipeline = create_pipeline(device);
     fmt::print("Pipeline initialized\n");
+
+    auto buffer = create_buffer(device, 0x1000);
+    fmt::print("Buffer allocated\n");
 
     return EXIT_SUCCESS;
 }
