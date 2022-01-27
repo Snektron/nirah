@@ -72,6 +72,10 @@ struct Unique {
     PalType* operator->() const {
         return this->ptr;
     }
+
+    PalType& operator*() const {
+        return *this->ptr;
+    }
 };
 
 Unique<Pal::IPlatform> create_platform() {
@@ -223,8 +227,64 @@ int main() {
     auto pipeline = create_pipeline(device);
     fmt::print("Pipeline initialized\n");
 
-    auto buffer = create_buffer(device, 0x1000);
-    fmt::print("Buffer allocated\n");
+    Pal::gpusize size = 0x1000;
+    auto input = create_buffer(device, size);
+    auto output = create_buffer(device, size);
+    fmt::print("Buffers allocated\n");
+
+    {
+        void* data;
+        checkResult(input->Map(&data));
+        auto* items = reinterpret_cast<uint8_t*>(data);
+        for (Pal::gpusize i = 0; i < size; ++i) {
+            items[i] = (uint8_t) i;
+        }
+        input->Unmap();
+        fmt::print("Wrote {} bytes to buffer\n", size);
+    }
+
+    fmt::print("Excuting test buffer copy...\n");
+
+    checkResult(cmd_buf->Begin({}));
+    auto region = Pal::MemoryCopyRegion{
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .copySize = size
+    };
+    cmd_buf->CmdCopyMemory(
+        *input,
+        *output,
+        1,
+        &region
+    );
+    checkResult(cmd_buf->End());
+
+    auto sub_queue_info = Pal::PerSubQueueSubmitInfo{
+        .cmdBufferCount = 1,
+        .ppCmdBuffers = &cmd_buf.ptr,
+    };
+
+    checkResult(queue->Submit({
+        .pPerSubQueueInfo = &sub_queue_info,
+        .perSubQueueInfoCount = 1,
+    }));
+    checkResult(queue->WaitIdle());
+    fmt::print("Buffers copied!\n");
+
+    {
+        fmt::print("Checking results...\n");
+        void* data;
+        checkResult(output->Map(&data));
+        auto* items = reinterpret_cast<uint8_t*>(data);
+        for (Pal::gpusize i = 0; i < size; ++i) {
+            if (items[i] != (uint8_t) i) {
+                fmt::print("Unexpected result at index {}: {} != {}\n", i, items[i], (uint8_t) i);
+                break;
+            }
+        }
+        output->Unmap();
+        fmt::print("Result OK\n");
+    }
 
     return EXIT_SUCCESS;
 }
