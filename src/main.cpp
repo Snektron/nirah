@@ -256,7 +256,7 @@ int main() {
         auto* input_items = reinterpret_cast<float*>(input_data);
         auto* output_items = reinterpret_cast<float*>(output_data);
         for (Pal::gpusize i = 0; i < n_items; ++i) {
-            input_items[i] = 2.0f;
+            input_items[i] = static_cast<float>(i);
             output_items[i] = 0;
         }
         checkResult(input->Unmap());
@@ -267,20 +267,27 @@ int main() {
     auto buffer_view_size = props.gfxipProperties.srdSizes.bufferView;
 
     // For some reason the shader seems to read buffer SRDs from another pointer which is stored in userdata 2/3...
-    auto table = create_buffer(device, buffer_view_size, Pal::VaRange::DescriptorTable);
+    auto table = create_buffer(device, buffer_view_size * 2, Pal::VaRange::DescriptorTable);
     fmt::print("Allocated table at 0x{:0<8X}\n", table->Desc().gpuVirtAddr);
     {
         void* data;
         checkResult(table->Map(&data));
         Pal::BufferViewInfo info[] = {
+            // For some reason these two are switched?
             {
                 .gpuAddr = output->Desc().gpuVirtAddr,
                 .range = size,
                 .stride = 0,
                 .swizzledFormat = Pal::UndefinedSwizzledFormat,
+            },
+            {
+                .gpuAddr = input->Desc().gpuVirtAddr,
+                .range = size,
+                .stride = 0,
+                .swizzledFormat = Pal::UndefinedSwizzledFormat,
             }
         };
-        device->CreateUntypedBufferViewSrds(1, info, data);
+        device->CreateUntypedBufferViewSrds(2, info, data);
         checkResult(table->Unmap());
         fmt::print("Wrote {} bytes to table\n", buffer_view_size);
     }
