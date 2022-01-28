@@ -184,10 +184,11 @@ Unique<Pal::IPipeline> create_pipeline(Pal::IDevice* device) {
     );
 }
 
-Unique<Pal::IGpuMemory> create_buffer(Pal::IDevice* device, Pal::gpusize size) {
+Unique<Pal::IGpuMemory> create_buffer(Pal::IDevice* device, Pal::gpusize size, Pal::VaRange va_range = Pal::VaRange::Default) {
     auto create_info = Pal::GpuMemoryCreateInfo{
         .size = size,
         .alignment = 0, // TODO: better alignment? 0 = allocation granularity
+        .vaRange = va_range,
         .priority = Pal::GpuMemPriority::Normal,
         .heapAccess = Pal::GpuHeapAccessExplicit, // Taken from glx, Memory::Create
         .heapCount = 1,
@@ -198,6 +199,18 @@ Unique<Pal::IGpuMemory> create_buffer(Pal::IDevice* device, Pal::gpusize size) {
         [&](Util::Result* result) { return device->GetGpuMemorySize(create_info, result); },
         [&](void* mem, Pal::IGpuMemory** buffer) { return device->CreateGpuMemory(create_info, mem, buffer); }
     );
+}
+
+void submit_cmd_buffer(Pal::IQueue* queue, Pal::ICmdBuffer* cmd_buf) {
+    auto sub_queue_info = Pal::PerSubQueueSubmitInfo{
+        .cmdBufferCount = 1,
+        .ppCmdBuffers = &cmd_buf,
+    };
+
+    checkResult(queue->Submit({
+        .pPerSubQueueInfo = &sub_queue_info,
+        .perSubQueueInfoCount = 1,
+    }));
 }
 
 int main() {
@@ -227,63 +240,85 @@ int main() {
     auto pipeline = create_pipeline(device);
     fmt::print("Pipeline initialized\n");
 
-    Pal::gpusize size = 0x1000;
+    Pal::gpusize n_items = 0x10;
+    Pal::gpusize size = n_items * sizeof(float);
     auto input = create_buffer(device, size);
     auto output = create_buffer(device, size);
     fmt::print("Buffers allocated\n");
+    fmt::print("Allocated input at 0x{:0<8X}\n", input->Desc().gpuVirtAddr);
+    fmt::print("Allocated output at 0x{:0<8X}\n", output->Desc().gpuVirtAddr);
 
     {
-        void* data;
-        checkResult(input->Map(&data));
-        auto* items = reinterpret_cast<uint8_t*>(data);
-        for (Pal::gpusize i = 0; i < size; ++i) {
-            items[i] = (uint8_t) i;
+        void* input_data;
+        void* output_data;
+        checkResult(input->Map(&input_data));
+        checkResult(output->Map(&output_data));
+        auto* input_items = reinterpret_cast<float*>(input_data);
+        auto* output_items = reinterpret_cast<float*>(output_data);
+        for (Pal::gpusize i = 0; i < n_items; ++i) {
+            input_items[i] = 2.0f;
+            output_items[i] = 0;
         }
-        input->Unmap();
-        fmt::print("Wrote {} bytes to buffer\n", size);
+        checkResult(input->Unmap());
+        checkResult(output->Unmap());
+        fmt::print("Wrote {} bytes to each buffer\n", size);
     }
 
-    fmt::print("Excuting test buffer copy...\n");
+    auto buffer_view_size = props.gfxipProperties.srdSizes.bufferView;
+
+    // For some reason the shader seems to read buffer SRDs from another pointer which is stored in userdata 2/3...
+    auto table = create_buffer(device, buffer_view_size, Pal::VaRange::DescriptorTable);
+    fmt::print("Allocated table at 0x{:0<8X}\n", table->Desc().gpuVirtAddr);
+    {
+        void* data;
+        checkResult(table->Map(&data));
+        Pal::BufferViewInfo info[] = {
+            {
+                .gpuAddr = output->Desc().gpuVirtAddr,
+                .range = size,
+                .stride = 0,
+                .swizzledFormat = Pal::UndefinedSwizzledFormat,
+            }
+        };
+        device->CreateUntypedBufferViewSrds(1, info, data);
+        checkResult(table->Unmap());
+        fmt::print("Wrote {} bytes to table\n", buffer_view_size);
+    }
+
+    fmt::print("Excuting test shader...\n");
 
     checkResult(cmd_buf->Begin({}));
-    auto region = Pal::MemoryCopyRegion{
-        .srcOffset = 0,
-        .dstOffset = 0,
-        .copySize = size
-    };
-    cmd_buf->CmdCopyMemory(
-        *input,
-        *output,
-        1,
-        &region
-    );
+    {
+        alignas(16) uint32_t user_data[1];
+        user_data[0] = table->Desc().gpuVirtAddr & 0xFFFFFFFF;
+
+        cmd_buf->CmdBindPipeline({
+            .pipelineBindPoint = Pal::PipelineBindPoint::Compute,
+            .pPipeline = pipeline.ptr,
+            .apiPsoHash = 1234, // ??
+        });
+        cmd_buf->CmdSetUserData(
+            Pal::PipelineBindPoint::Compute,
+            0, // Shader disassembly shows that SGPR 2 is used for the descriptor table, but apparently that offset is already added here?
+            1,
+            user_data
+        );
+        cmd_buf->CmdDispatch(n_items / 8, 1, 1);
+    }
     checkResult(cmd_buf->End());
 
-    auto sub_queue_info = Pal::PerSubQueueSubmitInfo{
-        .cmdBufferCount = 1,
-        .ppCmdBuffers = &cmd_buf.ptr,
-    };
-
-    checkResult(queue->Submit({
-        .pPerSubQueueInfo = &sub_queue_info,
-        .perSubQueueInfoCount = 1,
-    }));
+    submit_cmd_buffer(queue.ptr, cmd_buf.ptr);
     checkResult(queue->WaitIdle());
-    fmt::print("Buffers copied!\n");
+    fmt::print("Shader executed!\n");
 
     {
-        fmt::print("Checking results...\n");
         void* data;
         checkResult(output->Map(&data));
-        auto* items = reinterpret_cast<uint8_t*>(data);
-        for (Pal::gpusize i = 0; i < size; ++i) {
-            if (items[i] != (uint8_t) i) {
-                fmt::print("Unexpected result at index {}: {} != {}\n", i, items[i], (uint8_t) i);
-                break;
-            }
+        auto* items = reinterpret_cast<float*>(data);
+        for (Pal::gpusize i = 0; i < n_items; ++i) {
+            fmt::print("output[{}] = {}\n", i, items[i]);
         }
         output->Unmap();
-        fmt::print("Result OK\n");
     }
 
     return EXIT_SUCCESS;
